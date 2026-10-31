@@ -44,8 +44,7 @@
       "harness": ".agents",
       "launcher": true,
       "path": "examples/in/.agents/skills/impeccable",
-      "skill_version": "4.7.0",
-      "source_checkout": false
+      "skill_version": "4.7.0"
     },
     {
       "binaries": [
@@ -65,8 +64,7 @@
       "harness": ".claude",
       "launcher": true,
       "path": "examples/in/.claude/skills/impeccable",
-      "skill_version": "4.8.0",
-      "source_checkout": false
+      "skill_version": "4.8.0"
     },
     {
       "binaries": [
@@ -86,8 +84,7 @@
       "harness": ".grok",
       "launcher": true,
       "path": "examples/in/.grok/skills/impeccable",
-      "skill_version": "4.8.0",
-      "source_checkout": false
+      "skill_version": "4.8.0"
     }
   ],
   "ok": false,

@@ -125,7 +125,6 @@ def inspect_install(path):
         "skill_version": frontmatter_version(path / "SKILL.md"),
         "engine_version": None,
         "launcher": (scripts / "impeccable").is_file() or (scripts / "impeccable.cmd").is_file(),
-        "source_checkout": in_git_worktree(path),
         "binaries": [],
     }
     version_file = scripts / "VERSION"
@@ -235,7 +234,7 @@ def audit(roots, min_engine_bytes):
             if inst["launcher"] and not inst["binaries"]:
                 cache = Path.home() / ".impeccable" / "bin" / (ev or "")
                 if not (ev and cache.is_dir() and any(cache.iterdir())):
-                    source = inst["source_checkout"]
+                    source = in_git_worktree(Path(inst["path"]))
                     findings.append({
                         "rule": "missing-engine",
                         "severity": "warning" if source else "error",
