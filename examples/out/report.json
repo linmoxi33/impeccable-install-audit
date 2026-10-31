@@ -1,0 +1,104 @@
+{
+  "findings": [
+    {
+      "message": "skill 版本跨 harness 不一致: .agents=4.7.0, .claude=4.8.0, .grok=4.8.0",
+      "path": "examples/in",
+      "rule": "version-drift",
+      "severity": "error"
+    },
+    {
+      "message": "sha256=db80460285257099… 与 pin 的 3b7ce0cb47bf04e5… 不一致",
+      "path": "examples/in/.grok/skills/impeccable/scripts/bin/linux-x64/impeccable",
+      "rule": "checksum-mismatch",
+      "severity": "error"
+    },
+    {
+      "message": "同一引擎二进制(108 B, sha256=3b7ce0cb47bf04e5…)被复制了 2 份: examples/in/.agents/skills/impeccable/scripts/bin/linux-x64/impeccable, examples/in/.claude/skills/impeccable/scripts/bin/linux-x64/impeccable",
+      "path": "examples/in",
+      "rule": "duplicate-engine",
+      "severity": "error"
+    },
+    {
+      "message": "hook 指向的 launcher 不存在: ~/.agents/skills/impeccable/scripts/impeccable",
+      "path": "examples/in/.codex/hooks.json",
+      "rule": "hook-target-missing",
+      "severity": "error"
+    }
+  ],
+  "installs": [
+    {
+      "binaries": [
+        {
+          "asset": "impeccable",
+          "bytes": 108,
+          "expected_sha256": "3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab",
+          "path": "examples/in/.agents/skills/impeccable/scripts/bin/linux-x64/impeccable",
+          "platform": "linux-x64",
+          "sha256": "3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab"
+        }
+      ],
+      "checksum_versions": [
+        "0.1.18"
+      ],
+      "engine_version": "0.1.18",
+      "harness": ".agents",
+      "launcher": true,
+      "path": "examples/in/.agents/skills/impeccable",
+      "skill_version": "4.7.0",
+      "source_checkout": false
+    },
+    {
+      "binaries": [
+        {
+          "asset": "impeccable",
+          "bytes": 108,
+          "expected_sha256": "3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab",
+          "path": "examples/in/.claude/skills/impeccable/scripts/bin/linux-x64/impeccable",
+          "platform": "linux-x64",
+          "sha256": "3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab"
+        }
+      ],
+      "checksum_versions": [
+        "0.1.18"
+      ],
+      "engine_version": "0.1.18",
+      "harness": ".claude",
+      "launcher": true,
+      "path": "examples/in/.claude/skills/impeccable",
+      "skill_version": "4.8.0",
+      "source_checkout": false
+    },
+    {
+      "binaries": [
+        {
+          "asset": "impeccable",
+          "bytes": 132,
+          "expected_sha256": "3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab",
+          "path": "examples/in/.grok/skills/impeccable/scripts/bin/linux-x64/impeccable",
+          "platform": "linux-x64",
+          "sha256": "db804602852570995a882b19b69ca3590d37b1722c695482c77e5b66e0a94267"
+        }
+      ],
+      "checksum_versions": [
+        "0.1.18"
+      ],
+      "engine_version": "0.1.18",
+      "harness": ".grok",
+      "launcher": true,
+      "path": "examples/in/.grok/skills/impeccable",
+      "skill_version": "4.8.0",
+      "source_checkout": false
+    }
+  ],
+  "ok": false,
+  "schema": "impeccable-install-audit/1",
+  "summary": {
+    "errors": 4,
+    "findings": 4,
+    "installs": 3,
+    "roots": [
+      "examples/in"
+    ],
+    "warnings": 0
+  }
+}

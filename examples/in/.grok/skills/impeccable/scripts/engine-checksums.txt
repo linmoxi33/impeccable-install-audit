@@ -1,0 +1,2 @@
+# Engine binary digests for the pinned ENGINE_VERSION: <engine-version> <asset> <sha256>.
+0.1.18 impeccable-linux-x64 3b7ce0cb47bf04e5ca0aa702ee3245b275a1238b4fc8c2c91b624aea282564ab

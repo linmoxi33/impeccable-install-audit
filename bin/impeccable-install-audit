@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""impeccable-install-audit - offline consistency auditor for Impeccable installs.
+
+Scans a directory tree for Impeccable skill installs (``<harness>/skills/impeccable``)
+and reports drift the upstream CLI cannot see offline:
+
+  version-drift         skill versions disagree across harness copies
+  engine-pin-mismatch   scripts/VERSION disagrees with engine-checksums.txt
+  checksum-mismatch     engine binary sha256 disagrees with the pinned digest
+  duplicate-engine      the same engine binary is copied into several harness dirs
+  missing-engine        launcher present but no engine binary and no shared cache
+  hook-target-missing   a hook manifest points at a launcher path that does not exist
+  version-unreadable    SKILL.md has no parsable frontmatter version
+
+Exit codes: 0 clean, 1 findings, 2 usage/input error.
+No network access, no third-party dependencies.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+SCHEMA = "impeccable-install-audit/1"
+SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "vendor",
+    "target", "dist", "build", ".next", ".turbo",
+}
+HOOK_MANIFESTS = (
+    ".codex/hooks.json",
+    ".grok/hooks/impeccable.json",
+    ".github/hooks/impeccable.json",
+    ".cursor/hooks.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+)
+LAUNCHER_RE = re.compile(r"[^\s\"'`]*skills/impeccable/scripts/impeccable(?:\.cmd)?")
+MAX_DEPTH = 8
+
+
+def sha256_file(path, limit=64 * 1024 * 1024):
+    h = hashlib.sha256()
+    total = 0
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                return None, total
+            h.update(chunk)
+    return h.hexdigest(), total
+
+
+def frontmatter_version(skill_md):
+    """Return the ``version:`` value from a SKILL.md YAML frontmatter block."""
+    try:
+        text = Path(skill_md).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not text.startswith("---"):
+        return None
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None
+    for line in text[3:end].splitlines():
+        m = re.match(r"^\s*version\s*:\s*[\"']?([^\"'\s#]+)", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_checksums(path):
+    """Parse ``<engine-version> <asset> <sha256>`` lines into (versions, asset->sha)."""
+    versions, assets = set(), {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return versions, assets
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 3 or not re.fullmatch(r"[0-9a-f]{64}", parts[2]):
+            continue
+        versions.add(parts[0])
+        assets[parts[1]] = parts[2]
+    return versions, assets
+
+
+def find_installs(root):
+    """Yield directories that look like an installed Impeccable skill folder."""
+    found = []
+    root = Path(root)
+    base_depth = len(root.parts)
+    for dirpath, dirnames, _ in os.walk(root):
+        depth = len(Path(dirpath).parts) - base_depth
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".git"))
+        if depth >= MAX_DEPTH:
+            dirnames[:] = []
+        if Path(dirpath).name == "impeccable" and Path(dirpath).parent.name == "skills":
+            found.append(Path(dirpath))
+            dirnames[:] = []
+    return found
+
+
+def in_git_worktree(path):
+    """True when the install lives inside a checked-out git worktree (source tree)."""
+    for parent in [path] + list(path.parents):
+        if (parent / ".git").exists():
+            return True
+    return False
+
+
+def inspect_install(path):
+    scripts = path / "scripts"
+    info = {
+        "path": str(path),
+        "harness": path.parent.parent.name,
+        "skill_version": frontmatter_version(path / "SKILL.md"),
+        "engine_version": None,
+        "launcher": (scripts / "impeccable").is_file() or (scripts / "impeccable.cmd").is_file(),
+        "source_checkout": in_git_worktree(path),
+        "binaries": [],
+    }
+    version_file = scripts / "VERSION"
+    if version_file.is_file():
+        info["engine_version"] = version_file.read_text(encoding="utf-8", errors="replace").strip() or None
+
+    checksum_versions, assets = parse_checksums(scripts / "engine-checksums.txt")
+    info["checksum_versions"] = sorted(checksum_versions)
+
+    for candidate in sorted(scripts.glob("bin/*/*")) + sorted(path.glob("bin/*/*")):
+        if not candidate.is_file():
+            continue
+        platform = candidate.parent.name
+        digest, size = sha256_file(candidate)
+        info["binaries"].append({
+            "path": str(candidate),
+            "platform": platform,
+            "asset": candidate.name if candidate.name.endswith(".exe") else candidate.name,
+            "sha256": digest,
+            "bytes": size,
+        })
+
+    for b in info["binaries"]:
+        # asset keys look like impeccable-linux-x64 / impeccable-windows-x64.exe
+        for key in (f"impeccable-{b['platform']}", f"impeccable-{b['platform']}.exe"):
+            if key in assets:
+                b["expected_sha256"] = assets[key]
+                break
+    return info
+
+
+def expand_hook_path(raw):
+    raw = raw.strip().strip('"').strip("'")
+    raw = raw.replace("\\", "/")
+    if raw.startswith("~"):
+        raw = str(Path.home()) + raw[1:]
+    if not raw.startswith("/"):
+        return None
+    return raw
+
+
+def collect_hook_findings(root):
+    findings = []
+    for rel in HOOK_MANIFESTS:
+        manifest = Path(root) / rel
+        if not manifest.is_file():
+            continue
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        seen = set()
+        for raw in LAUNCHER_RE.findall(text):
+            target = expand_hook_path(raw)
+            if not target or target in seen:
+                continue
+            seen.add(target)
+            if not Path(target).is_file():
+                findings.append({
+                    "rule": "hook-target-missing",
+                    "severity": "error",
+                    "path": str(manifest),
+                    "message": f"hook 指向的 launcher 不存在: {raw}",
+                })
+    return findings
+
+
+def audit(roots, min_engine_bytes):
+    installs, findings = [], []
+
+    for root in roots:
+        root_installs = [inspect_install(p) for p in find_installs(root)]
+        installs.extend(root_installs)
+        if not root_installs:
+            continue
+
+        versions = {i["skill_version"] for i in root_installs if i["skill_version"]}
+        if len(versions) > 1:
+            findings.append({
+                "rule": "version-drift",
+                "severity": "error",
+                "path": str(root),
+                "message": "skill 版本跨 harness 不一致: " + ", ".join(
+                    f"{i['harness']}={i['skill_version'] or 'unknown'}" for i in root_installs),
+            })
+
+        engines = {i["engine_version"] for i in root_installs if i["engine_version"]}
+        if len(engines) > 1:
+            findings.append({
+                "rule": "engine-pin-mismatch",
+                "severity": "error",
+                "path": str(root),
+                "message": "engine 版本跨 harness 不一致: " + ", ".join(
+                    f"{i['harness']}={i['engine_version'] or 'unknown'}" for i in root_installs),
+            })
+
+        for inst in root_installs:
+            ev = inst["engine_version"]
+            if ev and inst["checksum_versions"] and ev not in inst["checksum_versions"]:
+                findings.append({
+                    "rule": "engine-pin-mismatch",
+                    "severity": "error",
+                    "path": inst["path"],
+                    "message": f"scripts/VERSION={ev} 不在 engine-checksums.txt 的版本 {inst['checksum_versions']} 中",
+                })
+
+            if inst["launcher"] and not inst["binaries"]:
+                cache = Path.home() / ".impeccable" / "bin" / (ev or "")
+                if not (ev and cache.is_dir() and any(cache.iterdir())):
+                    source = inst["source_checkout"]
+                    findings.append({
+                        "rule": "missing-engine",
+                        "severity": "warning" if source else "error",
+                        "path": inst["path"],
+                        "message": ("源码 checkout 不含引擎二进制（安装后才写入），跳过判定"
+                                    if source else
+                                    "存在 launcher，但 skill 目录内无引擎二进制，且共享缓存 ~/.impeccable/bin/ 下也没有"),
+                    })
+
+            for b in inst["binaries"]:
+                if b.get("expected_sha256") and b["sha256"] and b["sha256"] != b["expected_sha256"]:
+                    findings.append({
+                        "rule": "checksum-mismatch",
+                        "severity": "error",
+                        "path": b["path"],
+                        "message": f"sha256={b['sha256'][:16]}… 与 pin 的 {b['expected_sha256'][:16]}… 不一致",
+                    })
+
+            if inst["skill_version"] is None:
+                findings.append({
+                    "rule": "version-unreadable",
+                    "severity": "warning",
+                    "path": str(Path(inst["path"]) / "SKILL.md"),
+                    "message": "SKILL.md 缺少可解析的 frontmatter version",
+                })
+
+        by_sha = {}
+        for inst in root_installs:
+            for b in inst["binaries"]:
+                if b["sha256"] and b["bytes"] >= min_engine_bytes:
+                    by_sha.setdefault(b["sha256"], []).append(b)
+        for digest, copies in by_sha.items():
+            if len(copies) > 1:
+                findings.append({
+                    "rule": "duplicate-engine",
+                    "severity": "error",
+                    "path": str(root),
+                    "message": f"同一引擎二进制({copies[0]['bytes']} B, sha256={digest[:16]}…)被复制了 {len(copies)} 份: "
+                               + ", ".join(c["path"] for c in copies),
+                })
+
+        findings.extend(collect_hook_findings(root))
+
+    summary = {
+        "roots": [str(r) for r in roots],
+        "installs": len(installs),
+        "findings": len(findings),
+        "errors": sum(1 for f in findings if f["severity"] == "error"),
+        "warnings": sum(1 for f in findings if f["severity"] == "warning"),
+    }
+    return {"schema": SCHEMA, "ok": summary["errors"] == 0, "summary": summary,
+            "installs": installs, "findings": findings}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="impeccable-install-audit",
+        description="Offline consistency audit for Impeccable installs across agent harnesses.",
+    )
+    parser.add_argument("roots", nargs="*", default=["."], help="目录（默认当前目录）")
+    parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    parser.add_argument("--min-engine-bytes", type=int, default=1024 * 1024,
+                        help="参与重复检测的引擎最小字节数（默认 1 MiB）")
+    args = parser.parse_args(argv)
+
+    roots = [Path(r) for r in (args.roots or ["."])]
+    for r in roots:
+        if not r.exists() or not r.is_dir():
+            print(f"error: 不是目录: {r}", file=sys.stderr)
+            return 2
+
+    report = audit(roots, args.min_engine_bytes)
+
+    if report["summary"]["installs"] == 0:
+        print("error: 未找到任何 <harness>/skills/impeccable 安装", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"schema": SCHEMA, "ok": False, "error": "no-installs"}, ensure_ascii=False))
+        return 2
+
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for inst in report["installs"]:
+            print(f"install  {inst['harness']:<12} skill={inst['skill_version'] or '?':<8} "
+                  f"engine={inst['engine_version'] or '?':<8} {inst['path']}")
+        for f in report["findings"]:
+            print(f"{f['severity'].upper():<7} {f['rule']:<20} {f['message']}")
+        s = report["summary"]
+        print(f"\n{ s['installs'] } install(s), {s['errors']} error(s), {s['warnings']} warning(s)")
+
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
